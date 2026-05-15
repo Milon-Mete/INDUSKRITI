@@ -126,15 +126,8 @@ const Series = mongoose.model("Series", seriesSchema);
 
 
 /* ── 3.3  Product ──────────────────────────────────────── */
-const priceTierSchema = new mongoose.Schema(
-  {
-    minQty: { type: Number, required: true },
-    maxQty: { type: Number, required: true },
-    price:  { type: Number, required: true },
-  },
-  { _id: false }
-);
-
+// NOTE: priceTierSchema, moq, stockCount, and priceTiers have been removed.
+// Pricing is now flat: quantity × basePrice only.
 const productSchema = new mongoose.Schema(
   {
     name:        { type: String,  required: true, trim: true },
@@ -144,23 +137,11 @@ const productSchema = new mongoose.Schema(
     series:      { type: mongoose.Schema.Types.ObjectId, ref: "Series", default: null },
     description: { type: String,  trim: true },
     basePrice:   { type: Number,  required: true, min: 0 },
-    moq:         { type: Number,  required: true, min: 1, default: 1 },
-    stockCount:  { type: Number,  required: true, min: 0, default: 0 },
     images:      [{ type: String }],
-    priceTiers:  [priceTierSchema],
     isActive:    { type: Boolean, default: true },
   },
   { timestamps: true }
 );
-
-// Virtual: resolve price for a given quantity
-productSchema.methods.priceForQty = function (qty) {
-  const tier = this.priceTiers
-    .slice()
-    .sort((a, b) => b.minQty - a.minQty)
-    .find((t) => qty >= t.minQty && qty <= t.maxQty);
-  return tier ? tier.price : this.basePrice;
-};
 
 const Product = mongoose.model("Product", productSchema);
 
@@ -333,6 +314,7 @@ const V = {
     parentCategory: Joi.string().hex().length(24).optional().allow(null),
     isActive:       Joi.boolean().optional(),
   }),
+
   series: Joi.object({
     name:        Joi.string().min(2).max(80).required(),
     slug:        Joi.string().optional(),
@@ -340,6 +322,7 @@ const V = {
     isActive:    Joi.boolean().optional(),
   }),
 
+  // NOTE: moq, stockCount, and priceTiers validation removed.
   product: Joi.object({
     name:        Joi.string().min(2).max(200).required(),
     slug:        Joi.string().optional(),
@@ -348,16 +331,7 @@ const V = {
     series:      Joi.string().hex().length(24).optional().allow(null, ""),
     description: Joi.string().max(5000).optional(),
     basePrice:   Joi.number().min(0).required(),
-    moq:         Joi.number().integer().min(1).required(),
-    stockCount:  Joi.number().integer().min(0).required(),
-    priceTiers:  Joi.array().items(
-      Joi.object({
-        minQty: Joi.number().integer().min(1).required(),
-        maxQty: Joi.number().integer().min(1).required(),
-        price:  Joi.number().min(0).required(),
-      })
-    ).optional(),
-    isActive: Joi.boolean().optional(),
+    isActive:    Joi.boolean().optional(),
   }),
 
   createOrder: Joi.object({
@@ -662,9 +636,13 @@ const seriesCtrl = {
    ───────────────────────────────────────────────────────── */
 const productCtrl = {
 
-  /** POST /api/products  [admin] — multipart/form-data */
+  /**
+   * POST /api/products  [admin] — multipart/form-data
+   * Accepts: name, slug, sku, category, series, description, basePrice, isActive, images[]
+   * moq, stockCount, priceTiers are no longer accepted or stored.
+   */
   create: asyncHandler(async (req, res) => {
-    const { name, slug, sku, category,series, description, basePrice, moq, stockCount, priceTiers, isActive } = req.body;
+    const { name, slug, sku, category, series, description, basePrice, isActive } = req.body;
 
     // Collect uploaded image paths
     const images = req.files ? req.files.map((f) => `/${UPLOAD_DIR}/${f.filename}`) : [];
@@ -674,12 +652,10 @@ const productCtrl = {
       slug:       slug || toSlug(name),
       sku,
       category,
+      series:     series || null,
       description,
       basePrice:  Number(basePrice),
-      moq:        Number(moq),
-      stockCount: Number(stockCount),
       images,
-      priceTiers: priceTiers ? JSON.parse(priceTiers) : [],
       isActive:   isActive !== undefined ? isActive === "true" || isActive === true : true,
     });
 
@@ -705,7 +681,8 @@ const productCtrl = {
     const skip  = (Number(page) - 1) * Number(limit);
     const total = await Product.countDocuments(filter);
     const products = await Product.find(filter)
-      .populate("category", "name slug").populate("series", "name slug")
+      .populate("category", "name slug")
+      .populate("series", "name slug")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(Number(limit));
@@ -721,24 +698,26 @@ const productCtrl = {
 
   /** GET /api/products/:id */
   getOne: asyncHandler(async (req, res) => {
-    const product = await Product.findById(req.params.id).populate("category", "name slug");
+    const product = await Product.findById(req.params.id)
+      .populate("category", "name slug")
+      .populate("series", "name slug");
     if (!product || !product.isActive) throw new AppError("Product not found.", 404);
     res.json({ success: true, product });
   }),
 
-  /** PATCH /api/products/:id  [admin] — multipart/form-data */
+  /**
+   * PATCH /api/products/:id  [admin] — multipart/form-data
+   * moq, stockCount, priceTiers are no longer accepted or stored.
+   */
   update: asyncHandler(async (req, res) => {
     const product = await Product.findById(req.params.id);
     if (!product) throw new AppError("Product not found.", 404);
 
-    const fields = ["name", "slug", "sku", "category","series", "description", "isActive"];
+    const fields = ["name", "slug", "sku", "category", "series", "description", "isActive"];
     fields.forEach((k) => { if (req.body[k] !== undefined) product[k] = req.body[k]; });
-    if (req.body.basePrice  !== undefined) product.basePrice  = Number(req.body.basePrice);
-    if (req.body.moq        !== undefined) product.moq        = Number(req.body.moq);
-    if (req.body.stockCount !== undefined) product.stockCount = Number(req.body.stockCount);
-    if (req.body.priceTiers !== undefined) product.priceTiers = JSON.parse(req.body.priceTiers);
+    if (req.body.basePrice !== undefined) product.basePrice = Number(req.body.basePrice);
 
-    // Append new images (keep old ones too)
+    // Append new images (keep existing ones too)
     if (req.files && req.files.length > 0) {
       const newImages = req.files.map((f) => `/${UPLOAD_DIR}/${f.filename}`);
       product.images.push(...newImages);
@@ -766,8 +745,9 @@ const productCtrl = {
     product.images = product.images.filter((img) => img !== imageUrl);
     await product.save();
 
-    // Optionally delete from disk
-    const diskPath = path.join(process.cwd(), imageUrl);
+    // Delete from disk — strip leading slash before joining
+    const relativePath = imageUrl.startsWith("/") ? imageUrl.slice(1) : imageUrl;
+    const diskPath = path.join(process.cwd(), relativePath);
     if (fs.existsSync(diskPath)) fs.unlinkSync(diskPath);
 
     res.json({ success: true, message: "Image removed.", images: product.images });
@@ -782,19 +762,18 @@ const orderCtrl = {
 
   /**
    * POST /api/orders
-   * The WhatsApp Checkout Flow:
-   *  1. Validate each item (exists, active, sufficient stock, meets MOQ)
-   *  2. Resolve price per tier
+   * WhatsApp Checkout Flow:
+   *  1. Validate each item exists and is active
+   *  2. Calculate line total: qty × basePrice (flat, no tiers, no MOQ, no stock check)
    *  3. Apply coupon if provided
    *  4. Save order as Pending_WhatsApp
-   *  5. Return orderId + WhatsApp message string
-   *  ⚠  Stock is NOT deducted here.
+   *  5. Return orderId + WhatsApp message + link
    */
   createOrder: asyncHandler(async (req, res) => {
     const { items, couponCode, shippingDetails } = req.body;
     const user = req.user;
 
-    // ── Step 1: validate items against DB ──────────────────
+    // ── Step 1: validate items & build order lines ──────────
     const orderItems = [];
     let subtotal = 0;
 
@@ -804,19 +783,8 @@ const orderCtrl = {
       if (!product || !product.isActive)
         throw new AppError(`Product '${item.productId}' not found or inactive.`, 404);
 
-      if (item.qty < product.moq)
-        throw new AppError(
-          `Minimum order quantity for '${product.name}' is ${product.moq}. You ordered ${item.qty}.`,
-          400
-        );
-
-      if (item.qty > product.stockCount)
-        throw new AppError(
-          `Insufficient stock for '${product.name}'. Available: ${product.stockCount}.`,
-          400
-        );
-
-      const unitPrice = product.priceForQty(item.qty);
+      // Flat pricing: qty × basePrice (no tiers, no MOQ, no stock check)
+      const unitPrice = product.basePrice;
       const lineTotal = +(unitPrice * item.qty).toFixed(2);
       subtotal       += lineTotal;
 
@@ -839,11 +807,11 @@ const orderCtrl = {
     if (couponCode) {
       const coupon = await Coupon.findOne({ code: couponCode.toUpperCase(), isActive: true });
 
-      if (!coupon)                                   throw new AppError("Invalid coupon code.", 400);
-      if (coupon.expiryDate < new Date())            throw new AppError("Coupon has expired.", 400);
-      if (subtotal < coupon.minOrderAmt)             throw new AppError(`Minimum order amount for this coupon is ₹${coupon.minOrderAmt}.`, 400);
+      if (!coupon)                        throw new AppError("Invalid coupon code.", 400);
+      if (coupon.expiryDate < new Date()) throw new AppError("Coupon has expired.", 400);
+      if (subtotal < coupon.minOrderAmt)  throw new AppError(`Minimum order amount for this coupon is ₹${coupon.minOrderAmt}.`, 400);
       if (coupon.maxUses && coupon.usedCount >= coupon.maxUses)
-                                                     throw new AppError("Coupon usage limit reached.", 400);
+                                          throw new AppError("Coupon usage limit reached.", 400);
 
       discount = coupon.discountType === "percent"
         ? +((subtotal * coupon.value) / 100).toFixed(2)
@@ -877,16 +845,16 @@ const orderCtrl = {
     }
 
     // ── Step 4: build WhatsApp redirect info ────────────────
-    const waMessage   = buildWhatsAppMessage(order, user);
-    const waLink      = `https://wa.me/${WHATSAPP_NUM}?text=${encodeURIComponent(waMessage)}`;
+    const waMessage = buildWhatsAppMessage(order, user);
+    const waLink    = `https://wa.me/${WHATSAPP_NUM}?text=${encodeURIComponent(waMessage)}`;
 
     res.status(201).json({
       success: true,
       message: "Order placed. Redirect user to WhatsApp to confirm.",
-      orderId:          order.orderId,
-      totalAmount:      order.totalAmount,
-      whatsAppMessage:  waMessage,
-      whatsAppLink:     waLink,
+      orderId:         order.orderId,
+      totalAmount:     order.totalAmount,
+      whatsAppMessage: waMessage,
+      whatsAppLink:    waLink,
     });
   }),
 
@@ -924,37 +892,22 @@ const orderCtrl = {
 
   /** GET /api/admin/orders/:id  [admin] */
   getOrderById: asyncHandler(async (req, res) => {
-    const order = await Order.findById(req.params.id).populate("user", "name email phone companyName gstNumber");
+    const order = await Order.findById(req.params.id)
+      .populate("user", "name email phone companyName gstNumber");
     if (!order) throw new AppError("Order not found.", 404);
     res.json({ success: true, order });
   }),
 
   /**
    * PATCH /api/admin/orders/:id/status  [admin]
-   * ── Stock deduction happens HERE, only when moving to Confirmed.
+   * Simply updates the order status and optional admin notes.
+   * Stock deduction has been removed entirely.
    */
   updateOrderStatus: asyncHandler(async (req, res) => {
     const { status, adminNotes } = req.body;
 
     const order = await Order.findById(req.params.id);
     if (!order) throw new AppError("Order not found.", 404);
-
-    const prevStatus = order.status;
-
-    // ── Deduct stock only on Pending_WhatsApp → Confirmed ───
-    if (status === "Confirmed" && prevStatus === "Pending_WhatsApp") {
-      for (const item of order.items) {
-        const product = await Product.findById(item.productId);
-        if (!product) throw new AppError(`Product ${item.productId} no longer exists.`, 404);
-        if (product.stockCount < item.qty)
-          throw new AppError(
-            `Insufficient stock to confirm '${product.name}'. Available: ${product.stockCount}, Required: ${item.qty}.`,
-            400
-          );
-        product.stockCount -= item.qty;
-        await product.save();
-      }
-    }
 
     order.status = status;
     if (adminNotes !== undefined) order.adminNotes = adminNotes;
@@ -1057,7 +1010,11 @@ const adminUserCtrl = {
     if (!user) throw new AppError("User not found.", 404);
     user.isActive = !user.isActive;
     await user.save();
-    res.json({ success: true, message: `User ${user.isActive ? "activated" : "deactivated"}.`, isActive: user.isActive });
+    res.json({
+      success:  true,
+      message:  `User ${user.isActive ? "activated" : "deactivated"}.`,
+      isActive: user.isActive,
+    });
   }),
 };
 
@@ -1072,8 +1029,15 @@ app.use(cors({ origin: process.env.CLIENT_ORIGIN || "*", credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* ── Static files (uploaded images) ─────────────────────── */
-app.use(`/${UPLOAD_DIR}`, express.static(path.join(process.cwd(), UPLOAD_DIR)));
+/* ── Static files (uploaded images) ─────────────────────────
+   FIX: Images are stored as "/<UPLOAD_DIR>/filename.jpg" in the DB.
+   The static middleware must be mounted at that same path prefix so
+   GET /uploads/filename.jpg resolves to <cwd>/uploads/filename.jpg.
+   Using express.static with an explicit route prefix (app.use("/uploads", ...))
+   ensures the URL path and the filesystem path stay in sync regardless
+   of what UPLOAD_DIR is set to in .env.
+   ──────────────────────────────────────────────────────────── */
+app.use(`/${UPLOAD_DIR}`, express.static(path.resolve(process.cwd(), UPLOAD_DIR)));
 
 /* ── Health check ───────────────────────────────────────── */
 app.get("/api/health", (_req, res) =>
@@ -1103,7 +1067,7 @@ seriesRouter.get("/",    seriesCtrl.getAll);
 seriesRouter.get("/:id", seriesCtrl.getOne);
 seriesRouter.post(  "/",    protect, restrictTo("admin"), validate(V.series), seriesCtrl.create);
 seriesRouter.patch( "/:id", protect, restrictTo("admin"), validate(V.series), seriesCtrl.update);
-seriesRouter.delete("/:id", protect, restrictTo("admin"),                        seriesCtrl.remove);
+seriesRouter.delete("/:id", protect, restrictTo("admin"),                       seriesCtrl.remove);
 app.use("/api/series", seriesRouter);
 
 /* ── 10.3  Product routes ───────────────────────────────── */
@@ -1129,9 +1093,9 @@ app.use("/api/products", productRouter);
 /* ── 10.4  Order routes (buyer) ─────────────────────────── */
 const orderRouter = express.Router();
 orderRouter.use(protect);
-orderRouter.post("/",    validate(V.createOrder), orderCtrl.createOrder);
-orderRouter.get("/",     orderCtrl.getMyOrders);
-orderRouter.get("/:id",  orderCtrl.getMyOrder);
+orderRouter.post("/",   validate(V.createOrder), orderCtrl.createOrder);
+orderRouter.get("/",    orderCtrl.getMyOrders);
+orderRouter.get("/:id", orderCtrl.getMyOrder);
 app.use("/api/orders", orderRouter);
 
 /* ── 10.5  Coupon validation route (buyer) ──────────────── */
@@ -1144,8 +1108,8 @@ const adminRouter = express.Router();
 adminRouter.use(protect, restrictTo("admin"));
 
 // Admin → orders
-adminRouter.get("/orders",              orderCtrl.getAllOrders);
-adminRouter.get("/orders/:id",          orderCtrl.getOrderById);
+adminRouter.get("/orders",     orderCtrl.getAllOrders);
+adminRouter.get("/orders/:id", orderCtrl.getOrderById);
 adminRouter.patch(
   "/orders/:id/status",
   validate(V.updateOrderStatus),
@@ -1159,13 +1123,13 @@ adminRouter.patch( "/coupons/:id",                     couponCtrl.update);
 adminRouter.delete("/coupons/:id",                     couponCtrl.remove);
 
 // Admin → users
-adminRouter.get(   "/users",              adminUserCtrl.getAll);
-adminRouter.patch( "/users/:id/toggle",   adminUserCtrl.toggleActive);
+adminRouter.get(   "/users",            adminUserCtrl.getAll);
+adminRouter.patch( "/users/:id/toggle", adminUserCtrl.toggleActive);
 
 app.use("/api/admin", adminRouter);
 
 /* ── 404 handler ─────────────────────────────────────────── */
-app.use((_req, _res, next) => next(new AppError(`Route not found.`, 404)));
+app.use((_req, _res, next) => next(new AppError("Route not found.", 404)));
 
 /* ── Global error handler (MUST be last) ─────────────────── */
 app.use(globalErrorHandler);
@@ -1191,10 +1155,12 @@ const startServer = async () => {
     console.log("  GET    /api/orders");
     console.log("  POST   /api/coupons/validate");
     console.log("  GET    /api/admin/orders");
-    console.log("  PATCH  /api/admin/orders/:id/status  ← stock deduction");
+    console.log("  PATCH  /api/admin/orders/:id/status  ← status update only");
     console.log("  POST   /api/admin/coupons");
     console.log("  GET    /api/admin/users");
   });
 };
 
 startServer();
+
+// new server.js 16/5/26
