@@ -791,7 +791,7 @@ const productCtrl = {
     const { name, slug, sku, category, series, description, basePrice, isActive } = req.body;
     const images = req.files ? req.files.map((f) => `/${UPLOAD_DIR}/${f.filename}`) : [];
     const product = await Product.create({
-      name, slug: slug || toSlug(name), sku, category, series: series || null,
+      name, slug: slug || toSlug(name), sku, category, series: req.body.series ? req.body.series : null,
       description, basePrice: Number(basePrice), images,
       isActive: isActive !== undefined ? isActive === "true" || isActive === true : true,
     });
